@@ -1,0 +1,70 @@
+{
+  "name": "pi-skimmer",
+  "version": "0.1.0",
+  "description": "Goal-directed text and JSON filtering for Pi using Jev, with explicit consent, strict field projection, and recoverable results.",
+  "type": "module",
+  "license": "MIT",
+  "author": "jon-devlapaz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jon-devlapaz/pi-skimmer.git"
+  },
+  "homepage": "https://github.com/jon-devlapaz/pi-skimmer#readme",
+  "bugs": {
+    "url": "https://github.com/jon-devlapaz/pi-skimmer/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "jev",
+    "typesafe",
+    "context",
+    "filtering"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions/skimmer/index.ts",
+    "extensions/skimmer/core.ts",
+    "extensions/skimmer/artifacts.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/skimmer/index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "pi-typesafe": "0.9.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
+    "@types/node": "^26.1.1",
+    "prettier": "^3.9.5",
+    "typebox": "^1.3.6",
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "pi-typesafe": {
+      "@earendil-works/pi-coding-agent": "$@earendil-works/pi-coding-agent",
+      "@earendil-works/pi-tui": "$@earendil-works/pi-tui"
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types extensions/skimmer/*.test.ts",
+    "format:check": "prettier --check \"extensions/**/*.ts\" \"*.json\" \"README.md\" \".github/workflows/*.yml\"",
+    "prepublishOnly": "npm run check && npm test && npm run format:check"
+  }
+}
