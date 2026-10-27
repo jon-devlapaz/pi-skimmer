@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "run_id": "cb648bff-04ee-4eaf-ac71-17e13238c0e8",
+  "checkout": "/Users/jondev/dev/worktrees/pi-skimmer/i-delete-pi-skimmer-s-leftover-recovery-folders-myself-from-within-pi-using-a-sk",
+  "report": "/Users/jondev/dev/checkpoint-2026-10-27/build-report/build-report.md",
+  "model": "anthropic/claude-sonnet-5-5:high",
+  "launcher": "/Users/jondev/dev/worktrees/pi-skimmer/i-delete-pi-skimmer-s-leftover-recovery-folders-myself-from-within-pi-using-a-sk/_system/scripts/claude-launcher",
+  "launcher_sha256": "701472af446c87e2c47b019b76a4c41bcb96fd1ff4268b83aaee3bcaae56a69b",
+  "state": "completed",
+  "session": "f309f9c8-1473-4f76-8d79-3d58dcb79201",
+  "report_sha256": "64e442d26f41859b5bc02093530fdccc379b5dde79291ba4c1e38c1dc2289761"
+}

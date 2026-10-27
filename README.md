@@ -45,7 +45,10 @@ Alternatively, configure `TYPESAFE_API_KEY` in your own environment before start
 /skim enable
 /skim status
 /skim disable
+/skim clean
 ```
+
+`/skim clean` deletes the leftover recovery folders and reports how many it removed. It needs no consent and sends nothing off the machine. See [Privacy and failure behavior](#privacy-and-failure-behavior) for what it skips.
 
 Consent is separate from `/typesafe enable`, scoped to the current Pi session and working directory, and revoked on reload. The confirmation identifies the destination host. Disabling cancels active skims and blocks future ones.
 
@@ -94,7 +97,8 @@ Accepts 1–256 JSON items. `fields` selects literal top-level fields, not dotte
 - Obvious credential patterns are rejected; this is not comprehensive secret detection.
 - Input over 256,000 UTF-8 JSON bytes fails instead of silently truncating. Large individual records must be split explicitly.
 - Unjudged items are retained with warnings. Degraded API outcomes are explicitly marked as errors, not successful relevance judgments.
-- Full input and results are saved in temporary, owner-only recovery directories (`0700`, files `0600`). They contain the original data and persist until cleaned up; treat them accordingly. Temporary files are not permanent archival storage.
+- Full input and results are saved in temporary, owner-only recovery directories (`0700`, files `0600`). They contain the original data and persist until you run `/skim clean`; treat them accordingly. Temporary files are not permanent archival storage.
+- `/skim clean` removes only folders named `pi-skimmer-` plus six letters or digits, in the temp directory. It skips, and counts as skipped, anything else with that name: symlinks, entries owned by another user, and folders holding files other than `original.json` and `result.json`. It also skips any folder a skim in this session is writing and any folder modified in the last 5 minutes, which may belong to a skim in another Pi session or hold a result you have not read yet. Run it again later to remove those. Nothing is deleted automatically.
 - Displayed output is capped, with explicit truncation metadata and paths to complete recovery files. There is no top-N cap discarding retained material.
 - Relevance scores are probabilistic. They are not proof, authorization, or exhaustive verification. Read originals before critical decisions, especially for cross-references, constraints, and exceptions.
 
@@ -110,7 +114,7 @@ npm run format:check
 npm pack --dry-run --ignore-scripts
 ```
 
-Tests use synthetic fixtures and stubbed HTTP responses; they do not require a Jev key or make paid inference requests. They cover consent, real SDK command integration, strict projection, partial failure, budgets, cancellation, recovery permissions, and display caps.
+Tests use synthetic fixtures and stubbed HTTP responses; they do not require a Jev key or make paid inference requests. They cover consent, real SDK command integration, strict projection, partial failure, budgets, cancellation, recovery permissions, recovery cleanup, and display caps.
 
 The development-only npm overrides keep pi-typesafe's older optional Pi peer ranges aligned with the tested Pi SDK. Pi supplies the host packages at runtime; they are not bundled.
 
