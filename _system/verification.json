@@ -1,9 +1,0 @@
-{
-  "require_tink": false,
-  "checks": [
-    {"argv": ["npm", "ci", "--ignore-scripts"], "timeout_seconds": 300},
-    {"argv": ["npm", "run", "check"], "timeout_seconds": 180},
-    {"argv": ["npm", "test"], "timeout_seconds": 180},
-    {"argv": ["npm", "run", "format:check"], "timeout_seconds": 120}
-  ]
-}
