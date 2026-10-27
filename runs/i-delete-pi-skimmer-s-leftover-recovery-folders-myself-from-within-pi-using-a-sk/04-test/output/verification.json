@@ -1,13 +1,24 @@
 {
-  "result": "failed",
-  "error": "Checklist incomplete: seed-6 (mark them with: sdlc.py mark i-delete-pi-skimmer-s-leftover-recovery-folders-myself-from-within-pi-using-a-sk <id> passed --evidence \"...\")",
+  "result": "passed",
+  "candidate": {
+    "head": "27acc167555010110253d4ca4ceed8fc84a274b8",
+    "tree": "84263e96d6c88fa3c7b575dae807cb39368e15cad02bf1aa63af2a246cb9d979"
+  },
   "inputs": "5e9cb91e2e31738fd159314929cbcac9979d968b2fee3cb73c065989ec492305",
+  "policy": "644100b5e51e673b257f75198fdffef1bd131ab2fcd63f186ad4a7c43ba4708c",
+  "test_lock": null,
+  "checklist": "57ba36d7351a32661148961de4e997372ceb4e8c53b5cb399645741dc886cbbd",
+  "manual_marks": {
+    "seed-6": "6e689fb4767c35493a5e96750da0abc9e26ffe6223a698b4b3835bf9c6cf63e3"
+  },
+  "checklist_items": {},
   "seed_checks": {
     "seed-1": "pending",
     "seed-2": "pending",
     "seed-3": "pending",
     "seed-4": "proven",
     "seed-5": "proven",
-    "seed-6": "pending"
-  }
+    "seed-6": "attested"
+  },
+  "log": "3a08226d256e26a8b292f37f2fac79abe30dd7acd547b617297ad38f9e35c463"
 }
