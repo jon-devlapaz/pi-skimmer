@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""Reviewed tink-sdlc-launcher protocol 1 adapter for headless Pi build steps.
+
+Promises: every launch and resume passes the step pin to Pi explicitly as
+--model provider/model-id --thinking level; resolve reads only local files and
+never starts Pi or opens a connection; resume refuses a session whose recorded
+model differs from the pin, stops a resumed run that answers on another model within
+the admission window, and admits one still thinking once its new prompt is recorded
+on the pin;
+finished reads only local files and reports true only when the newest turn ended
+normally on the pin.
+Refuses: pins without an explicit thinking level, models absent from Pi's local
+catalog cache, providers without stored credentials, missing or archived sessions.
+It is not a Herdr adapter and does not use pi-herdr routing or Pi session restore.
+"""
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+PROTOCOL = 'tink-sdlc-launcher'
+# The Pi executable; TINK_SDLC_PI replaces it (tests point it at a fake Pi).
+PI_COMMAND = 'pi'
+THINKING = ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+# Admission must finish inside sdlc.py's 60-second adapter timeout; TINK_SDLC_PI_ADMISSION
+# may only shorten it (tests use a short window).
+ADMISSION_SECONDS = 50
+
+
+class Refusal(Exception):
+    pass
+
+
+def parse_pin(pin):
+    model, sep, thinking = (pin or '').rpartition(':')
+    if not sep or thinking not in THINKING:
+        raise Refusal('Pin must name its thinking level explicitly: provider/model-id:' + '|'.join(THINKING))
+    provider, slash, model_id = model.partition('/')
+    if not provider or not slash or not model_id:
+        raise Refusal('Pin must be an exact provider/model-id.')
+    return provider, model_id, thinking
+
+
+def agent_dir():
+    configured = os.environ.get('PI_CODING_AGENT_DIR')
+    return Path(configured).expanduser() if configured else Path.home() / '.pi' / 'agent'
+
+
+def read_json(path, label):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        raise Refusal(f'{label} is missing at {path}; cannot resolve offline.') from None
+    except (OSError, ValueError) as error:
+        raise Refusal(f'{label} at {path} is unreadable: {error}') from None
+
+
+def check_catalog(provider, model_id, thinking):
+    """Pi's cached catalog is the offline source; an uncached model is refused, never guessed."""
+    entry = read_json(agent_dir() / 'models-store.json', "Pi's model catalog cache").get(provider)
+    models = entry.get('models') if isinstance(entry, dict) else None
+    match = [m for m in models or [] if isinstance(m, dict) and m.get('id') == model_id
+             and m.get('provider', provider) == provider]
+    if not match:
+        raise Refusal(f"{provider}/{model_id} is not in Pi's local catalog cache; no alias or default is used.")
+    if match[0].get('reasoning') is False and thinking != 'off':
+        raise Refusal(f'{provider}/{model_id} does not reason; Pi would silently clamp thinking {thinking}.')
+
+
+def check_auth(provider):
+    """Credential presence only; values are never printed or sent anywhere."""
+    credential = read_json(agent_dir() / 'auth.json', "Pi's credential store").get(provider)
+    fields = {'oauth': ('refresh', 'access'), 'api_key': ('key',)}.get(
+        credential.get('type') if isinstance(credential, dict) else None, ())
+    if not any(isinstance(credential.get(f), str) and credential[f] for f in fields):
+        raise Refusal(f'Provider {provider} has no stored Pi credential; environment keys are not trusted here.')
+
+
+def session_dir(checkout):
+    # Pi's directory for this checkout, passed explicitly so lookup never depends on settings.
+    configured = os.environ.get('PI_CODING_AGENT_SESSION_DIR')
+    if configured:
+        return Path(configured).expanduser()
+    safe = str(checkout).lstrip('/\\').replace('/', '-').replace('\\', '-').replace(':', '-')
+    return agent_dir() / 'sessions' / f'--{safe}--'
+
+
+def header(path):
+    try:
+        with path.open() as stream:
+            first = json.loads(stream.readline())
+    except (OSError, ValueError):
+        return None
+    return first if isinstance(first, dict) and first.get('type') == 'session' else None
+
+
+def find_session(directory, session_id):
+    for path in sorted(directory.glob('*.jsonl')) if directory.is_dir() else ():
+        if (header(path) or {}).get('id') == session_id:
+            return path
+    return None
+
+
+def entries(path):
+    found = []
+    for line in path.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            found.append(entry)
+    return found
+
+
+def branch(path):
+    """The active branch: the newest entry and its parent chain, oldest first."""
+    tree = [e for e in entries(path) if e.get('type') != 'session' and e.get('id')]
+    by_id = {e['id']: e for e in tree}
+    chain, node, seen = [], tree[-1] if tree else None, set()
+    while node and node['id'] not in seen:
+        seen.add(node['id'])
+        chain.append(node)
+        node = by_id.get(node.get('parentId'))
+    return chain[::-1]
+
+
+def answered_by(entry):
+    message = entry.get('message') if entry.get('type') == 'message' else None
+    if isinstance(message, dict) and message.get('role') == 'assistant':
+        return f"{message.get('provider')}/{message.get('model')}"
+    return None
+
+
+def recorded_model(path):
+    """Pi's own restore rule: the last model_change or assistant answer on the branch."""
+    for entry in reversed(branch(path)):
+        if entry.get('type') == 'model_change':
+            return f"{entry.get('provider')}/{entry.get('modelId')}"
+        if answered_by(entry):
+            return answered_by(entry)
+    return None
+
+
+def finished(path, pin):
+    """The newest entry on the active branch is a pinned answer that stopped normally."""
+    chain = branch(path)
+    last = chain[-1] if chain else {}
+    return answered_by(last) == pin and last['message'].get('stopReason') == 'stop'
+
+
+def checkout_of(contract):
+    record = read_json(Path(contract), 'Step contract')
+    checkout = Path(record.get('checkout') or '')
+    if not checkout.is_absolute() or checkout.resolve() != Path.cwd().resolve():
+        raise Refusal('Step contract checkout does not match the adapter working directory.')
+    return checkout
+
+
+def retained_session(args, provider, model_id):
+    if not args.session:
+        raise Refusal('Resume needs the retained session identity.')
+    directory = session_dir(checkout_of(args.contract))
+    path = find_session(directory, args.session)
+    if path is None:
+        archived = agent_dir() / 'sessions-archive'
+        moved = any((header(p) or {}).get('id') == args.session for p in archived.rglob('*.jsonl')) if archived.is_dir() else False
+        state = 'was archived by session rotation' if moved else 'is missing'
+        raise Refusal(f'Retained session {args.session} {state}; it is not restored or replaced automatically.')
+    recorded = recorded_model(path)
+    if recorded != f'{provider}/{model_id}':
+        raise Refusal(f'Retained session last ran on {recorded}, not the pin {provider}/{model_id}; resume refused.')
+    return path
+
+
+def resolve(args, operation):
+    provider, model_id, thinking = parse_pin(args.model)
+    check_catalog(provider, model_id, thinking)
+    check_auth(provider)
+    if not Path(args.report).is_absolute():
+        raise Refusal('Report path must be absolute.')
+    path = retained_session(args, provider, model_id) if operation == 'resume' else None
+    if operation == 'launch':
+        checkout_of(args.contract)
+    return provider, model_id, thinking, path
+
+
+def prompt(args, operation, checkout):
+    run_dir = Path(args.contract).resolve().parent.parent
+    metadata = read_json(run_dir / 'run.json', 'Run metadata')
+    if metadata.get('profile') == 'light':
+        inputs = [run_dir / 'brief.md']
+    elif metadata.get('profile') == 'full':
+        inputs = [run_dir / '01-plan/output/intent.md', run_dir / '02-design/output/spec.md',
+                  run_dir / '03-build/output/plan.md']
+    else:
+        raise Refusal('Run profile must be light or full.')
+    context = checkout / 'stages' / '03-build' / 'CONTEXT.md'
+    named_inputs = ', '.join(str(path) for path in inputs)
+    return (f'You are the build agent for this run. Implement the approved run work using '
+            f'{named_inputs}; read those approved inputs, stage-3 CONTEXT.md at {context}, the '
+            f'step contract at {args.contract}, and checkout instructions first. Work only in '
+            f'{checkout}. Write your handoff report to exactly {args.report} (absolute path). '
+            f'Never run sdlc.py step, stage or decide. Do not change the model or thinking level.')
+
+
+def pi_command():
+    command = os.environ.get('TINK_SDLC_PI') or shutil.which(PI_COMMAND)
+    if not command:
+        raise Refusal('Pi executable not found.')
+    return command
+
+
+def stop(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+def admission_seconds():
+    try:
+        configured = float(os.environ.get('TINK_SDLC_PI_ADMISSION', ADMISSION_SECONDS))
+    except ValueError:
+        return ADMISSION_SECONDS
+    return configured if 0 < configured <= ADMISSION_SECONDS else ADMISSION_SECONDS
+
+
+def admit(args, operation):
+    provider, model_id, thinking, retained = resolve(args, operation)  # recheck right before any request
+    pin = f'{provider}/{model_id}'
+    checkout = checkout_of(args.contract)
+    directory = session_dir(checkout)
+    directory.mkdir(parents=True, exist_ok=True)
+    if operation == 'launch':
+        session_id = 'tsdlc-' + uuid.uuid4().hex
+        target = ['--session-id', session_id]
+        before = 0
+    else:
+        session_id = args.session
+        target = ['--session', str(retained)]
+        before = len(entries(retained))
+    argv = [pi_command(), '--mode', 'json', '--session-dir', str(directory), *target,
+            '--model', pin, '--thinking', thinking, '--', prompt(args, operation, checkout)]
+    log = Path(args.contract).with_name(f'{Path(args.contract).stem}.{operation}-{int(time.time())}.pi.log')
+    child_env = os.environ.copy()
+    child_env['TINK_SDLC_STEP_SESSION'] = '1'
+    with log.open('ab') as output:
+        process = subprocess.Popen(argv, cwd=checkout, env=child_env, stdin=subprocess.DEVNULL, stdout=output,
+                                   stderr=output, start_new_session=True)
+    window = admission_seconds()
+    deadline = time.monotonic() + window
+    prompted = False
+    while time.monotonic() < deadline:
+        path = retained or find_session(directory, session_id)
+        new = entries(path)[before:] if path else []
+        for entry in new:
+            model = answered_by(entry)
+            if model and model != pin:
+                stop(process)
+                raise Refusal(f'Pi answered on {model}, not the pin {pin}; the run was stopped. Log: {log}')
+            asked = (entry.get('type') == 'message' and entry['message'].get('role') == 'user'
+                     and recorded_model(path) == pin)
+            prompted = prompted or asked
+            if model or (operation == 'launch' and asked
+                         and any(e.get('type') == 'thinking_level_change' and e.get('thinkingLevel') == thinking
+                                 for e in new)):
+                return session_id
+        if process.poll() not in (None, 0):
+            raise Refusal(f'Pi exited {process.returncode} before admission was confirmed. Log: {log}')
+        time.sleep(0.2)
+    # A resumed turn can think past the window: its recorded prompt on the pin admits it.
+    if operation == 'resume' and prompted and process.poll() is None:
+        return session_id
+    raise Refusal(f'Pi admission was not confirmed in {window:g}s; process {process.pid} '
+                  f'may still run. Inspect {log} and the session before reconciling.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('operation', choices=['resolve', 'launch', 'resume', 'finished'])
+    for flag in ('model', 'report', 'contract', 'session'):
+        parser.add_argument('--' + flag)
+    parser.add_argument('--for-operation', choices=['launch', 'resume'])
+    args = parser.parse_args()
+    operation = args.for_operation if args.operation == 'resolve' else args.operation
+    try:
+        if not operation or not args.contract:
+            raise Refusal('resolve needs --for-operation and every operation needs --contract.')
+        if args.operation == 'resolve':
+            resolve(args, operation)
+            session = args.session
+        elif args.operation == 'finished':
+            provider, model_id, _ = parse_pin(args.model)
+            done = finished(retained_session(args, provider, model_id), f'{provider}/{model_id}')
+            session = args.session
+        else:
+            session = admit(args, operation)
+    except Refusal as refusal:
+        print(f'pi-launcher: {refusal}', file=sys.stderr)
+        return 1
+    reply = {'protocol': PROTOCOL, 'api_version': 1, 'operation': operation, 'model': args.model}
+    if args.operation == 'finished':
+        reply['finished'] = done
+    if session:
+        reply['session'] = session
+    print(json.dumps(reply))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
