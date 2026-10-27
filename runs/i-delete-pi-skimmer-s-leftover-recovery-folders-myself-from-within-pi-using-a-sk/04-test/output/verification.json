@@ -1,0 +1,13 @@
+{
+  "result": "failed",
+  "error": "Checklist incomplete: seed-6 (mark them with: sdlc.py mark i-delete-pi-skimmer-s-leftover-recovery-folders-myself-from-within-pi-using-a-sk <id> passed --evidence \"...\")",
+  "inputs": "5e9cb91e2e31738fd159314929cbcac9979d968b2fee3cb73c065989ec492305",
+  "seed_checks": {
+    "seed-1": "pending",
+    "seed-2": "pending",
+    "seed-3": "pending",
+    "seed-4": "proven",
+    "seed-5": "proven",
+    "seed-6": "pending"
+  }
+}
