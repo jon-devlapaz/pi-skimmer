@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -17,7 +18,13 @@ import {
   prepareSkim,
   type Prepared,
 } from "./core.ts";
-import { present, saveOriginal, saveResult } from "./artifacts.ts";
+import {
+  cleanArtifacts,
+  describeClean,
+  present,
+  saveOriginal,
+  saveResult,
+} from "./artifacts.ts";
 
 interface Dependencies {
   createClient(): TypeSafe;
@@ -99,6 +106,7 @@ export default function skimmer(
   let generation = 0;
   let lifetime = new AbortController();
   let lastSummary = "No material processed.";
+  const writing = new Set<string>();
 
   function synchronize(ctx: ExtensionContext) {
     const id = ctx.sessionManager.getSessionId();
@@ -166,6 +174,8 @@ export default function skimmer(
     active.throwIfAborted();
     const currentClient = getClient();
     const paths = await saveOriginal(prepared, dependencies.artifactRoot);
+    const folder = dirname(paths.originalPath);
+    writing.add(folder);
     try {
       const outcome = await judgePrepared(
         currentClient,
@@ -206,6 +216,8 @@ export default function skimmer(
       throw new Error(
         `${active.aborted ? "Skimming cancelled or timed out" : "Skimming could not complete"}. Original input retained at ${paths.originalPath}. No discarded output should be treated as a relevance judgment.`,
       );
+    } finally {
+      writing.delete(folder);
     }
   }
 
@@ -225,7 +237,7 @@ export default function skimmer(
 
   pi.registerCommand("skim", {
     description:
-      "Enable/disable external Jev skimming for this session and working directory, or show status",
+      "Enable/disable external Jev skimming for this session and working directory, show status, or clean up old recovery folders",
     async handler(args, ctx) {
       synchronize(ctx);
       const action = args.trim() || "status";
@@ -292,8 +304,18 @@ export default function skimmer(
         );
         return;
       }
+      if (action === "clean") {
+        report(
+          describeClean(
+            await cleanArtifacts(dependencies.artifactRoot, {
+              active: writing,
+            }),
+          ),
+        );
+        return;
+      }
       if (action !== "status")
-        throw new Error("Usage: /skim enable | disable | status");
+        throw new Error("Usage: /skim enable | disable | status | clean");
       const auth = dependencies.auth();
       const spend = auth.usable ? getClient().getSpend() : undefined;
       report(

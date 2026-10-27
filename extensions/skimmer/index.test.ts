@@ -1,9 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import register from "./index.ts";
+import { IDLE_MS } from "./artifacts.ts";
 import { MAX_OUTPUT_BYTES } from "./core.ts";
 
 function harness(
@@ -129,6 +141,22 @@ function harness(
       nextConfirm = fn;
     },
   };
+}
+
+function seedFolder(
+  root: string,
+  name: string,
+  options: { files?: string[]; ageMs?: number } = {},
+) {
+  const directory = join(root, name);
+  mkdirSync(directory, { mode: 0o700 });
+  const time = new Date(Date.now() - (options.ageMs ?? IDLE_MS + 60_000));
+  for (const file of options.files ?? ["original.json", "result.json"]) {
+    writeFileSync(join(directory, file), "{}\n", { mode: 0o600 });
+    utimesSync(join(directory, file), time, time);
+  }
+  utimesSync(directory, time, time);
+  return directory;
 }
 
 test("registers only the two explicit-input tools, without replacing reads or fetching", () => {
@@ -514,6 +542,148 @@ test("disable cancels an active batch without returning partial verdicts", async
     ).text,
     "hello",
   );
+});
+
+test("clean removes abandoned and finished recovery folders and reports how many", async () => {
+  const h = harness();
+  seedFolder(h.root, "pi-skimmer-Ab3dE9", { files: ["original.json"] });
+  seedFolder(h.root, "pi-skimmer-Zy0xW1");
+  await h.command("clean");
+  assert.deepEqual(readdirSync(h.root), []);
+  assert.equal(h.notifications.at(-1), "Removed 2 recovery folders.");
+  await h.command("clean");
+  assert.equal(h.notifications.at(-1), "Removed 0 recovery folders.");
+  seedFolder(h.root, "pi-skimmer-Qq7rT2");
+  await h.command("clean");
+  assert.equal(h.notifications.at(-1), "Removed 1 recovery folder.");
+});
+
+test("clean works without consent or a UI and sends nothing", async () => {
+  const h = harness({ hasUI: false });
+  seedFolder(h.root, "pi-skimmer-Ab3dE9");
+  await h.command("clean");
+  assert.deepEqual(readdirSync(h.root), []);
+  assert.equal(h.notifications.at(-1), "Removed 1 recovery folder.");
+  assert.equal(h.constructors(), 0);
+  assert.equal(h.requests.length, 0);
+});
+
+test("clean never touches entries that are not exact pi-skimmer folders", async () => {
+  const h = harness();
+  const outside = mkdtempSync(join(tmpdir(), "skimmer-outside-"));
+  try {
+    writeFileSync(join(outside, "keep.txt"), "outside\n");
+    mkdirSync(join(h.root, "unrelated"));
+    writeFileSync(join(h.root, "unrelated", "file.txt"), "unrelated\n");
+    mkdirSync(join(h.root, "pi-skimmer-notes"));
+    writeFileSync(join(h.root, "pi-skimmer-notes", "file.txt"), "notes\n");
+    writeFileSync(join(h.root, "pi-skimmer-AAAAAA"), "plain file\n");
+    symlinkSync(outside, join(h.root, "pi-skimmer-BBBBBB"));
+    const extra = seedFolder(h.root, "pi-skimmer-CCCCCC", {
+      files: ["original.json", "notes.txt"],
+    });
+    seedFolder(h.root, "pi-skimmer-Ab3dE9");
+    await h.command("clean");
+    assert.deepEqual(readdirSync(h.root).sort(), [
+      "pi-skimmer-AAAAAA",
+      "pi-skimmer-BBBBBB",
+      "pi-skimmer-CCCCCC",
+      "pi-skimmer-notes",
+      "unrelated",
+    ]);
+    assert.equal(
+      readFileSync(join(h.root, "pi-skimmer-AAAAAA"), "utf8"),
+      "plain file\n",
+    );
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "outside\n");
+    assert.equal(readFileSync(join(extra, "notes.txt"), "utf8"), "{}\n");
+    assert.equal(
+      readFileSync(join(h.root, "pi-skimmer-notes", "file.txt"), "utf8"),
+      "notes\n",
+    );
+    assert.equal(
+      readFileSync(join(h.root, "unrelated", "file.txt"), "utf8"),
+      "unrelated\n",
+    );
+    const message = h.notifications.at(-1)!;
+    assert.match(message, /^Removed 1 recovery folder\./);
+    assert.match(message, /Skipped 3:.*3 not a plain pi-skimmer folder/);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("clean skips folders modified within the idle margin and removes them once idle", async () => {
+  const h = harness();
+  seedFolder(h.root, "pi-skimmer-Fresh1", { ageMs: 0 });
+  seedFolder(h.root, "pi-skimmer-Near01", { ageMs: IDLE_MS - 60_000 });
+  seedFolder(h.root, "pi-skimmer-Idle01", { ageMs: IDLE_MS + 60_000 });
+  await h.command("clean");
+  assert.deepEqual(readdirSync(h.root).sort(), [
+    "pi-skimmer-Fresh1",
+    "pi-skimmer-Near01",
+  ]);
+  const message = h.notifications.at(-1)!;
+  assert.match(message, /^Removed 1 recovery folder\./);
+  assert.match(message, /Skipped 2: 2 in progress or modified within the last/);
+  assert.match(message, /run \/skim clean again later/);
+});
+
+test("clean does not delete a folder a skim is still writing, even when it looks idle", async () => {
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const h = harness({
+    enabled: true,
+    evaluate: async (_requests, config) => {
+      entered();
+      await new Promise<void>((resolve) =>
+        config.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        }),
+      );
+      return {
+        answers: {},
+        failures: 1,
+        skipped: 1,
+        usage: { input_tokens: 0, output_tokens: 0 },
+      };
+    },
+  });
+  const running = h.execute("skim_text", { text: "hello", goal: "goal" });
+  await ready;
+  const [name] = readdirSync(h.root);
+  const directory = join(h.root, name!);
+  assert.ok(existsSync(join(directory, "original.json")));
+  assert.ok(!existsSync(join(directory, "result.json")));
+  await h.command("clean");
+  assert.ok(existsSync(join(directory, "original.json")));
+  assert.match(h.notifications.at(-1)!, /^Removed 0 recovery folders\./);
+  // Backdate the folder so only the in-progress tracking can protect it.
+  const old = new Date(Date.now() - IDLE_MS - 60_000);
+  utimesSync(join(directory, "original.json"), old, old);
+  utimesSync(directory, old, old);
+  await h.command("clean");
+  assert.ok(existsSync(join(directory, "original.json")));
+  assert.match(h.notifications.at(-1)!, /^Removed 0 recovery folders\./);
+  assert.match(h.notifications.at(-1)!, /Skipped 1: 1 in progress/);
+  const rejected = assert.rejects(
+    running,
+    /cancelled.*Original input retained/,
+  );
+  await h.command("disable");
+  await rejected;
+  utimesSync(join(directory, "original.json"), old, old);
+  utimesSync(directory, old, old);
+  await h.command("clean");
+  assert.deepEqual(readdirSync(h.root), []);
+  assert.match(h.notifications.at(-1)!, /^Removed 1 recovery folder\./);
+});
+
+test("unknown subcommands list clean in the usage error", async () => {
+  const h = harness();
+  await assert.rejects(h.command("bogus"), /Usage: .*\bclean\b/);
 });
 
 test("unexpected transport failures do not expose exception bodies or submitted secrets", async () => {
